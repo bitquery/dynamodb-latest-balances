@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Bitquery Token Stream Processor — Kafka → DynamoDB'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  KafkaConfigSsmName:
+    Type: String
+    Default: /bitquery/kafka-config
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.medium, t3.large, m5.large, c5.large]
+
+Resources:
+  ProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      Policies:
+        - PolicyName: ProcessorPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:GetItem]
+                Resource: !GetAtt TokenBalancesTable.Arn
+              - Effect: Allow
+                Action: [ssm:GetParameter]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${KafkaConfigSsmName}"
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: "*"
+
+  ProcessorInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref ProcessorRole]
+
+  TokenBalancesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TokenBalances
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: address; AttributeType: S
+      KeySchema:
+        - AttributeName: address; KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification: {SSEEnabled: true}
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "${AWS::StackName}-logs"
+      RetentionInDays: 14
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${AWS::StackName}-lt"
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: {Arn: !GetAtt ProcessorInstanceProfile.Arn}
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            apt-get update
+            apt-get install -y docker.io
+            systemctl enable --now docker
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            REGION=${AWS::Region}
+            REPO_URL="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/token-processor:latest"
+            aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $REPO_URL
+            mkdir -p /app/config
+            aws ssm get-parameter --name "${KafkaConfigSsmName}" --with-decryption --query Parameter.Value --output text > /app/config/kafka_config.yaml
+            docker run --rm \
+              -v /app/config:/app/config:ro \
+              -e AWS_REGION=$REGION \
+              --log-driver=awslogs \
+              --log-opt awslogs-group=${LogGroup} \
+              --log-opt awslogs-region=$REGION \
+              --log-opt awslogs-stream=processor-$(date +%s) \
+              $REPO_URL
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${AWS::StackName}-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: "1"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      VPCZoneIdentifier: !Ref SubnetIds
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+
+  ErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-HighErrorRate"
+      Namespace: "Bitquery/TokenProcessor"
+      MetricName: "Errors"
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${AWS::StackName} Alerts"
+
+Outputs:
+  TableName: {Value: !Ref TokenBalancesTable, Export: {Name: !Sub "${AWS::StackName}-TableName"}}
+  LogGroupName: {Value: !Ref LogGroup}
+  KafkaConfigParam: {Value: !Ref KafkaConfigSsmName}
