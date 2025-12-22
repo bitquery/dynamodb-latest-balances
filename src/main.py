@@ -2,7 +2,7 @@ import os
 import logging
 import signal
 import sys
-from typing import Optional
+import argparse
 from src.config_loader import load_config
 from src.kafka_consumer import create_consumer, consume_messages
 from src.message_decoder import decode_token_block_message
@@ -31,13 +31,18 @@ if USE_EMBEDDED_METRICS:
         return metrics
 
 def main():
-    config = load_config()
 
-    local_mode = os.getenv("LOCAL_MODE", "false").lower() == "true"
+    parser = argparse.ArgumentParser(description="Write latest balances in DynamoDb")
+    parser.add_argument("--config", default="config/kafka_config.yaml", help="Configuration file path")
+
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+
     ddb_writer = DDBWriter(
         table_name=config["aws"]["ddb_table_name"],
         region=config["aws"]["region"],
-        local_mode=local_mode
+        max_workers=config["workers"],
     )
 
     consumer = create_consumer(config)
@@ -45,8 +50,8 @@ def main():
     def message_handler(msg):
         try:
             decoded = decode_token_block_message(msg.value())
-            records = process_token_block(decoded)
-
+            records, block_number = process_token_block(decoded)
+            logger.info(f"Processing block {block_number}...")
             if USE_EMBEDDED_METRICS:
                 metrics = get_metrics()
                 metrics.put_metric("MessagesProcessed", 1, "Count")
@@ -54,6 +59,8 @@ def main():
 
             if records:
                 ddb_writer.write_if_newer(records)
+                consumer.commit(msg)
+                logger.info(f"Messages written to DynamoDB for block {block_number}")
                 if USE_EMBEDDED_METRICS:
                     metrics = get_metrics()
                     metrics.put_metric("DynamoDBWrites", len(records), "Count")

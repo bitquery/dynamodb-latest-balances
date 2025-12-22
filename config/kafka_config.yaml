@@ -8,11 +8,13 @@ kafka:
   sasl_username: "<your_username>"
   sasl_password: "<your_password>"
   group_id: "<your_username>_token_processor_group"
-  auto_offset_reset: "earliest"
-  enable_auto_commit: true
+  auto_offset_reset: "latest"
+  enable_auto_commit: false
 
 topic: "eth.tokens.proto"
 
+workers: 10
+
 aws:
   region: "us-east-1"
-  ddb_table_name: "eth_balances"
+  ddb_table_name: "ethereum_eth_tx_balances"
