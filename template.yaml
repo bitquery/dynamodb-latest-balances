@@ -81,25 +81,19 @@ Resources:
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash -xe
-            # Set password for ubuntu user (for EC2 Serial Console fallback)
-            cat > /etc/cloud/cloud.cfg.d/99-enable-console-login.cfg <<'EOF'
-            users:
-              - name: ubuntu
-                lock_passwd: false
-                passwd: "$6$rounds=4096$salt1234$VwXxYyZz..."  # optional: pre-hashed
-            password: ubuntu_w33
-            chpasswd:
-              expire: false
-            EOF
-            # Also set it NOW (in case cloud-init doesn’t apply it)
-            echo 'ubuntu:ubuntu' | chpasswd
+            echo "Wait for network to be OK..."
+            sleep 60
+            useradd -m -s /bin/bash -p "$(openssl passwd -6 'console_w33')" console
+            usermod -aG sudo console
             apt-get update
-            apt-get install -y docker.io
+            apt-get install -y docker.io awscli
             systemctl enable --now docker
+            REPO_NAME="dynamodb-latest-balances"
             ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
             REGION=${AWS::Region}
-            REPO_URL="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/dynamodb-latest-balances:latest"
-            aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $REPO_URL
+            REGISTRY="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+            REPO_URL="$REGISTRY/$REPO_NAME:$TAG"
+            aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY"
             mkdir -p /app/config
             aws ssm get-parameter --name "${KafkaConfigSsmName}" --with-decryption --query Parameter.Value --output text > /app/config/kafka_config.yaml
             docker run --rm \
