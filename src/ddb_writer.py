@@ -7,7 +7,6 @@ import os
 
 logger = logging.getLogger(__name__)
 
-
 class DDBWriter:
     def __init__(
         self,
@@ -50,21 +49,6 @@ class DDBWriter:
                     failed += 1
 
         logger.info(f"✅ Batch result: {succeeded} updated, {skipped} skipped, {failed} failed")
-
-        # Optional: EMF metrics (safe to omit if not in AWS)
-        try:
-            from aws_embedded_metrics import metric_scope
-            @metric_scope
-            def emit_metrics(metrics):
-                metrics.set_namespace("Bitquery/TokenProcessor")
-                metrics.put_dimensions({"Service": "DDBWriter"})
-                metrics.put_metric("DDBBatchSize", len(records), "Count")
-                metrics.put_metric("DDBWrites", succeeded, "Count")
-                metrics.put_metric("DDBSkipped", skipped, "Count")
-                metrics.put_metric("DDBFailures", failed, "Count")
-            emit_metrics()
-        except ImportError:
-            pass  # Skip EMF in local dev if package not installed
 
     def _update_item(self, rec: Dict[str, Any]) -> str:
         address = rec.get("address")

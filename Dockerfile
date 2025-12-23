@@ -10,8 +10,9 @@ COPY --from=builder /root/.local /root/.local
 COPY streaming_protobuf/evm/python/evm/ ./evm/
 COPY src/ ./src/
 COPY requirements.txt .
+COPY main.py .
 RUN pip install --no-cache-dir -r requirements.txt
 ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD python -c "import sys; sys.exit(0)" || exit 1
-CMD ["python", "src/main.py"]
+CMD ["python", "main.py"]

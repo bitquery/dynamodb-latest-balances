@@ -4,8 +4,9 @@ Description: 'Bitquery Token Stream Processor — Kafka → DynamoDB'
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
-  SubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet (with IGW route + auto-assign public IP)
   KafkaConfigSsmName:
     Type: String
     Default: /bitquery/kafka-config
@@ -16,6 +17,10 @@ Parameters:
     Type: String
     Default: t3.medium
     AllowedValues: [t3.medium, t3.large, m5.large, c5.large]
+  ContainerImageTag:
+    Type: String
+    Default: latest
+    Description: Docker image tag for dynamodb-latest-balances
 
 Resources:
   ProcessorRole:
@@ -25,29 +30,53 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal: {Service: ec2.amazonaws.com}
+            Principal: { Service: ec2.amazonaws.com }
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Modern replacement
       Policies:
         - PolicyName: ProcessorPermissions
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:GetItem]
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
                 Resource: !GetAtt TokenBalancesTable.Arn
+
               - Effect: Allow
-                Action: [ssm:GetParameter]
+                Action: ssm:GetParameter
                 Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${KafkaConfigSsmName}"
+
               - Effect: Allow
-                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
-                Resource: "*"
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroup}:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroup}"
+
+              # 🔑 Critical: ECR permissions
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"  # Required — global action
+
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/dynamodb-latest-balances"
 
   ProcessorInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      Roles: [!Ref ProcessorRole]
+      Roles: [ !Ref ProcessorRole ]
 
   TokenBalancesTable:
     Type: AWS::DynamoDB::Table
@@ -62,13 +91,19 @@ Resources:
           KeyType: HASH
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: false
-      SSESpecification: {SSEEnabled: true}
+      SSESpecification: { SSEEnabled: true }
 
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "${AWS::StackName}-logs"
       RetentionInDays: 14
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName} - outbound only"
+      VpcId: !Ref VpcId   # ← must reference your VPC ID
 
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -77,14 +112,16 @@ Resources:
       LaunchTemplateData:
         ImageId: !Ref ImageId
         InstanceType: !Ref InstanceType
-        IamInstanceProfile: {Arn: !GetAtt ProcessorInstanceProfile.Arn}
+        IamInstanceProfile: { Arn: !GetAtt ProcessorInstanceProfile.Arn }
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: true
+            DeviceIndex: 0
+            SubnetId: !Ref PublicSubnetId
+            Groups:
+              - !GetAtt SecurityGroup.GroupId
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash -xe
-            echo "Wait for network to be OK..."
-            sleep 60
-            useradd -m -s /bin/bash -p "$(openssl passwd -6 'console_w33')" console
-            usermod -aG sudo console
             apt-get update
             apt-get install -y docker.io awscli
             systemctl enable --now docker
@@ -92,10 +129,10 @@ Resources:
             ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
             REGION=${AWS::Region}
             REGISTRY="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
-            REPO_URL="$REGISTRY/$REPO_NAME:$TAG"
+            REPO_URL="$REGISTRY/$REPO_NAME:${ContainerImageTag}"
             aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY"
             mkdir -p /app/config
-            aws ssm get-parameter --name "${KafkaConfigSsmName}" --with-decryption --query Parameter.Value --output text > /app/config/kafka_config.yaml
+            aws ssm get-parameter --name "${KafkaConfigSsmName}" --with-decryption --region "$REGION" --query Parameter.Value --output text > /app/config/kafka_config.yaml
             docker run --rm \
               -v /app/config:/app/config:ro \
               -e AWS_REGION=$REGION \
@@ -115,12 +152,13 @@ Resources:
       MinSize: "1"
       MaxSize: "1"
       DesiredCapacity: "1"
-      VPCZoneIdentifier: !Ref SubnetIds
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetId
       HealthCheckType: EC2
       HealthCheckGracePeriod: 300
     UpdatePolicy:
       AutoScalingRollingUpdate:
-        MinInstancesInService: "0"   # since DesiredCapacity=1
+        MinInstancesInService: "0"
         MaxBatchSize: "1"
         PauseTime: PT0S
         WaitOnResourceSignals: false
@@ -128,26 +166,20 @@ Resources:
           - HealthCheck
           - ReplaceUnhealthy
 
-  ErrorRateAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub "${AWS::StackName}-HighErrorRate"
-      Namespace: "Bitquery/TokenProcessor"
-      MetricName: "Errors"
-      Statistic: Sum
-      Period: 60
-      EvaluationPeriods: 3
-      Threshold: 3
-      ComparisonOperator: GreaterThanThreshold
-      TreatMissingData: notBreaching
-      AlarmActions: [!Ref AlertTopic]
-
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
       DisplayName: !Sub "${AWS::StackName} Alerts"
 
 Outputs:
-  TableName: {Value: !Ref TokenBalancesTable, Export: {Name: !Sub "${AWS::StackName}-TableName"}}
-  LogGroupName: {Value: !Ref LogGroup}
-  KafkaConfigParam: {Value: !Ref KafkaConfigSsmName}
+  TableName:
+    Value: !Ref TokenBalancesTable
+    Export:
+      Name: !Sub "${AWS::StackName}-TableName"
+  LogGroupName:
+    Value: !Ref LogGroup
+  KafkaConfigParam:
+    Value: !Ref KafkaConfigSsmName
+  LaunchTemplateName:
+    Value: !Ref LaunchTemplate
+

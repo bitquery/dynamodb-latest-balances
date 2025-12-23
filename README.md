@@ -49,31 +49,6 @@ returns
 }
 ```
 
-### Create VPC in AWS console
-
-Create VPC together with subnet(s), no public access required
-
-Create CF stack, substitute vpc IDs and subnet ID(s) :
-
-```
-aws cloudformation deploy \
-  --template-file template.yaml \
-  --stack-name dynamodb-latest-balances-prod \
-  --parameter-overrides \
-    VpcId=vpc-xxxxxxxx \
-    SubnetIds=subnet-aaaaaaa,subnet-bbbbbbb \
-  --capabilities CAPABILITY_IAM \
-  --region us-east-1
-```
-
-returns
-
-```
-Waiting for changeset to be created..
-Waiting for stack create/update to complete
-Successfully created/updated stack - dynamodb-latest-balances-prod
-```
-
 ### Build & Push Docker Image to ECR
 
 ```
@@ -109,10 +84,37 @@ REPO=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/dynamodb-latest-balances:latest
 
 aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $REPO
 
-docker build -t dynamodb-latest-balances .
+docker buildx build --platform linux/amd64 -t dynamodb-latest-balances .
 docker tag dynamodb-latest-balances:latest $REPO
 docker push $REPO
 ```
+
+### Create VPC in AWS console
+
+Create VPC together with subnet(s), NAT gateway for publi Inet access
+
+Create CF stack, substitute vpc IDs (vpc-xxxxxxxx) and public subnet ID(subnet-aaaaaaa) :
+
+```
+aws cloudformation deploy \
+  --template-file template.yaml \
+  --stack-name dynamodb-latest-balances-prod \
+  --parameter-overrides \
+    VpcId=vpc-xxxxxxxx \
+    PublicSubnetId=subnet-aaaaaaa \
+  --capabilities CAPABILITY_IAM \
+  --region us-east-1
+```
+
+
+returns
+
+```
+Waiting for changeset to be created..
+Waiting for stack create/update to complete
+Successfully created/updated stack - dynamodb-latest-balances-prod
+```
+
 
 ### Check instances running
 
