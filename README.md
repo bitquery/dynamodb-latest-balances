@@ -130,20 +130,6 @@ aws ec2 describe-instances \
 +----------------------+----------+-------+-----------------------------+
 ```
 
-Ssh if needed
-
-```
-aws ssm start-session --target
-```
-
-
-Logs
-
-```
-aws logs describe-log-streams \
-  --log-group-name dynamodb-latest-balances-prod-logs \
-  --region us-east-1
-```
 
 ## Reverting deployment
 
