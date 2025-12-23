@@ -206,3 +206,4 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 /config/kafka_config.local.yaml
+/config/kafka_config.yaml

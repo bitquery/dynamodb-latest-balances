@@ -16,11 +16,11 @@ services:
       timeout: 5s
       retries: 5
 
-  token-processor:
+  dynamodb-latest-balances:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: token-processor
+    container_name: dynamodb-latest-balances
     depends_on:
       dynamodb-local:
         condition: service_healthy

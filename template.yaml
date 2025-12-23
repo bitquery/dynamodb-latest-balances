@@ -52,14 +52,16 @@ Resources:
   TokenBalancesTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: TokenBalances
+      TableName: ethereum_eth_tx_balances
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: address; AttributeType: S
+        - AttributeName: address
+          AttributeType: S
       KeySchema:
-        - AttributeName: address; KeyType: HASH
+        - AttributeName: address
+          KeyType: HASH
       PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
+        PointInTimeRecoveryEnabled: false
       SSESpecification: {SSEEnabled: true}
 
   LogGroup:
@@ -79,12 +81,24 @@ Resources:
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash -xe
+            # Set password for ubuntu user (for EC2 Serial Console fallback)
+            cat > /etc/cloud/cloud.cfg.d/99-enable-console-login.cfg <<'EOF'
+            users:
+              - name: ubuntu
+                lock_passwd: false
+                passwd: "$6$rounds=4096$salt1234$VwXxYyZz..."  # optional: pre-hashed
+            password: ubuntu_w33
+            chpasswd:
+              expire: false
+            EOF
+            # Also set it NOW (in case cloud-init doesn’t apply it)
+            echo 'ubuntu:ubuntu' | chpasswd
             apt-get update
             apt-get install -y docker.io
             systemctl enable --now docker
             ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
             REGION=${AWS::Region}
-            REPO_URL="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/token-processor:latest"
+            REPO_URL="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/dynamodb-latest-balances:latest"
             aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $REPO_URL
             mkdir -p /app/config
             aws ssm get-parameter --name "${KafkaConfigSsmName}" --with-decryption --query Parameter.Value --output text > /app/config/kafka_config.yaml
@@ -110,6 +124,15 @@ Resources:
       VPCZoneIdentifier: !Ref SubnetIds
       HealthCheckType: EC2
       HealthCheckGracePeriod: 300
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: "0"   # since DesiredCapacity=1
+        MaxBatchSize: "1"
+        PauseTime: PT0S
+        WaitOnResourceSignals: false
+        SuspendProcesses:
+          - HealthCheck
+          - ReplaceUnhealthy
 
   ErrorRateAlarm:
     Type: AWS::CloudWatch::Alarm

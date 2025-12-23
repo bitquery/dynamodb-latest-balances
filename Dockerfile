@@ -7,10 +7,8 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /root/.local /root/.local
-COPY proto_compiled/ ./proto_compiled/
+COPY streaming_protobuf/evm/python/evm/ ./evm/
 COPY src/ ./src/
-COPY config/ ./config/
-COPY local/ ./local/
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 ENV PATH=/root/.local/bin:$PATH
