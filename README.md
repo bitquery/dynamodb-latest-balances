@@ -11,7 +11,7 @@ edit it to set user names and password and save, do not commit to git!
 
 ```bash
 
-python src/main.py --config=config/kafka_config.local.yaml
+python main.py --config=config/kafka_config.local.yaml
 
 ```
 
